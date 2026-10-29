@@ -3,5 +3,17 @@
     "author": "vBook",
     "description": ""
   },
-  "data": []
+  "data": [
+    {
+      "name": "Buon Dua",
+      "author": "vBook",
+      "path": "https://raw.githubusercontent.com/lqvu-zen/vbook-extensions/master/buondua/plugin.zip",
+      "version": 1,
+      "source": "https://buondua.com",
+      "icon": "https://raw.githubusercontent.com/lqvu-zen/vbook-extensions/master/buondua/icon.png",
+      "description": "Photo galleries from buondua.com",
+      "type": "comic",
+      "locale": "en"
+    }
+  ]
 }
