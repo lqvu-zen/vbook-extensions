@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "name": "Buon Dua",
+    "author": "vBook",
+    "version": 1,
+    "source": "https://buondua.com",
+    "description": "Photo galleries from buondua.com",
+    "locale": "en",
+    "regexp": "buondua\\.com/[^/?]+-\\d+(?:\\?page=\\d+)?$",
+    "type": "comic",
+    "nsfw": true,
+    "encrypt": true
+  },
+  "script": {
+    "home": "home.js",
+    "search": "search.js",
+    "detail": "detail.js",
+    "toc": "toc.js",
+    "chap": "chap.js"
+  },
+  "config": {
+    "DOMAIN": {
+      "title": "Domain",
+      "default": "https://buondua.com",
+      "mode": "input",
+      "format": "text"
+    }
+  }
+}
