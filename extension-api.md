@@ -315,12 +315,49 @@ function execute() {
 ```
 
 Dynamic values are stored in a separate extension-setting table and are **not**
-injected as constants — read them with `localConfig.getItem(key)` (`null` when the
-user never set one; the `default` is not returned). The script owns the key
+injected as constants — read them with `localConfig.getItem(key, defaultValue?)`:
+it returns `defaultValue` when the user never set one, else `null` (the schema's
+`default` is not stored, so pass it here). Older app versions ignore the second
+argument and return `null`; keep a `|| fallback` if the extension must run on them.
+The script owns the key
 namespace, so it can distinguish global, source, or other scopes without a native
 `bookId` field. `config.js` runs when the extension detail screen opens and again
 after a **dynamic** value changes (debounced 300 ms) so dependent fields can change;
 changing a static value does not re-run it.
+
+Scripts of a `translate` extension (including actions) can also read what the user
+picked for that extension through reserved keys:
+
+| Key | Value |
+|-----|-------|
+| `translate_model` | Selected model `id` |
+| `translate_style` | Selected style `id` |
+| `translate_from_language` | Source language `id` |
+| `translate_to_language` | Target language `id` |
+
+The value follows the same order as a translation: the book's setting, then its
+source's, then the global one; a book or source set to another engine is skipped.
+Nothing selected returns `defaultValue` (or `null`), so always keep a fallback, which
+also covers older app versions. A setting of your own under one of these keys wins.
+
+```js
+let model = localConfig.getItem("translate_model") || DEFAULT_MODEL;
+```
+
+Scripts of a `tts` extension get the same for the reader's TTS settings of that
+extension. Dub and audio export jobs pick their own voice, passed to `tts.js` as
+`voiceId`, so keep using that parameter for synthesis.
+
+| Key | Value |
+|-----|-------|
+| `tts_voice` | Selected voice `id` |
+| `tts_language` | Selected language tag |
+| `tts_speed` | Speech rate, e.g. `"1.0"` |
+| `tts_pitch` | Pitch, e.g. `"1.0"` |
+| `tts_volume` | Volume, e.g. `"1.0"` |
+
+`tts_speed`, `tts_pitch` and `tts_volume` are never empty: the app's default `"1.0"` is
+returned until the user changes them.
 
 If a dynamic item uses the same key as a static one, the settings UI shows the
 dynamic item and saves into the dynamic table; the injected constant keeps the static
@@ -428,6 +465,23 @@ a host — the item's `host`, else the extension `source`. Anything starting wit
 `http` counts as absolute; protocol-relative `//cdn…` URLs are **not** recognised —
 prefix them with `https:`.
 
+A `cover` is fetched with `Referer` set to the book's page (the item's `link`, or the
+detail URL). Where an image host wants otherwise, give the item (explore / list / search
+items, `detail.js`) a `referrerpolicy` beside its `cover`, as on an HTML `<img>`:
+
+```javascript
+{
+    name: el.select("a").text(),
+    link: el.select("a").attr("href"),
+    cover: el.select("img").attr("src"),
+    referrerpolicy: "no-referrer"   // or "origin": send only the site, e.g. https://example.com/
+}
+```
+
+The policy can also go straight into the URL — handy for a plain string, e.g. a comic
+image: `"https://cdn.example.com/1.jpg#referrerpolicy=no-referrer"`. The part after `#`
+is never sent to the server; where both are given, the attribute wins.
+
 ### home.js
 
 Returns a list of tabs. Each tab has a title and a list script (ignored when
@@ -505,6 +559,59 @@ function execute() {
 | `items` | array | no | List of explore items |
 | `shape` | string | no | Card shape of the items: `book` (2:3, default), `square`, `circle`, `movie` (16:9), `short` (9:16) |
 | `more` | object | no | "See more" action on the section header (an action, see below — normally `type: "list"`) |
+| `script` | string | no | Load the section's items on their own, after the page shows — see [Sections that load on their own](#sections-that-load-on-their-own). Ignored when `items` is given |
+| `input` | string | no | Passed to `script` as `query` (`args[0]`) |
+
+#### Sections that load on their own
+
+A page that joins several APIs takes as long as all of them one after another: a script
+runs its `fetch` calls in turn. Instead, give a section a `script` (and `input`) in place
+of `items`. `explore.js` then returns at once with just the outline; the app shows the
+page, with a placeholder in each such section, and runs the sections' scripts side by side
+(a few at a time, top first), filling each in as it answers.
+
+```js
+// explore.js — the outline only, nothing slow
+function execute() {
+    return Response.success([
+        { id: "banner", type: "banner", script: "banner.js" },
+        { id: "hot", type: "horizontal_list", title: "Hot", script: "hot.js" },
+        {
+            id: "latest", type: "grid", title: "Latest Updates",
+            script: "latest.js", input: "",          // the "see more" list script, reused
+            more: { type: "list", name: "Latest Updates", script: "latest.js", input: "" },
+        },
+    ]);
+}
+```
+
+The section's script is called like the first page of a list script —
+`execute(query, page)` with `query` = the section's `input` and `page` = `""` — and returns
+its items as `data`, in the explore item format below (`action`, `type` and the rest
+apply). `data2` is ignored. So the list script behind a section's "see more" can serve its
+items as well, with no extra file:
+
+```js
+// hot.js
+function execute(query, page) {
+    let doc = fetch("https://example.com/hot").html();
+    return Response.success(doc.select(".item").map(function(el) {
+        return {
+            name: el.select(".title").text(),
+            cover: el.select("img").attr("src"),
+            link: el.select("a").attr("href"),
+        };
+    }));
+}
+```
+
+- A section whose script returns no items is hidden; one that fails shows a retry.
+- Sections with `items` and sections with a `script` mix freely: put what the first
+  request already has straight in `items`.
+- Pull to refresh runs `explore.js` again, then the sections' scripts.
+- The web reader loads these sections server-side and gets the page whole.
+- App versions before this show such a section empty — require a recent app if a page
+  depends on it.
 
 **Section `type` values:**
 
@@ -660,16 +767,17 @@ function execute(url) {
         ongoing: true,
         nsfw: false,
         locale: "vi",
-        // Each of tags/genres/suggests/reviews/comments is { title, input, script }
+        // Each of genres/tags/suggests/reviews/comments is { title, input, script }
         // where `script` is called with `input` as args[0] to fetch that list.
-        tags: doc.select(".tag").map(function(el) {
+        // The detail screen shows `genres` as chips; `tags` is not displayed.
+        genres: doc.select(".tag").map(function(el) {
             return {
                 title: el.text(),
                 input: el.attr("href"),
                 script: "genre_items.js",
             };
         }),
-        genres: [],
+        tags: [],
         suggests: [],
         reviews: [],
         comment: null,       // single comment source, or omit
@@ -703,8 +811,8 @@ function execute(url) {
 | `ongoing` | boolean | `true` if ongoing, `false` if completed. Default `true` |
 | `nsfw` | boolean | Adult content flag. Default `false` |
 | `locale` | string | ISO language code |
-| `tags` | array | List of `{ title, input, script }` |
-| `genres` | array | List of `{ title, input, script }` |
+| `tags` | array | List of `{ title, input, script }`. Translated but **not displayed** on the detail screen — put the links users should see in `genres` |
+| `genres` | array | List of `{ title, input, script }`, shown as genre/tag chips on the detail screen; tapping one opens its list |
 | `suggests` | array | Similar items `{ title, input, script }` |
 | `reviews` | array | Review items `{ title, input, script }` |
 | `comment` | object | A single comment source `{ title, input, script }` (shown before `comments`) |
@@ -835,6 +943,7 @@ entries are URL strings, or objects for more control:
 | `fallback` | string[] | Alternative URLs tried when `link` fails |
 | `width` / `height` | number | Known size, lets the reader lay out before loading |
 | `script` | string | Script file (in `src/`) that loads this image: `execute(link)` returns the image bytes as a **bare base64 string** (not `Response`, no `data:` prefix) — e.g. to unscramble tiles. Used only for `http(s)` links |
+| `referrerpolicy` | string | As on an HTML `<img>`: `no-referrer` (no `Referer`) or `origin` (only the site). Default: `Referer` is the chapter URL. Applies to `fallback` too. A plain string entry can carry it in the URL instead: `"…/1.jpg#referrerpolicy=no-referrer"` |
 
 ```js
 // Novel
@@ -846,6 +955,50 @@ function execute(url) {
     return Response.success(content, title);
 }
 ```
+
+#### Paragraph comments (novel)
+
+To show a comment count after a paragraph (tap opens its comments, with translation,
+paging and replies), put a `<comment>` tag at the end of that paragraph in the chapter HTML:
+
+```html
+<p>平江城。<comment count="757" input="pid=123" script="para_comment.js"></comment></p>
+```
+
+| Attribute | Description |
+|-----------|-------------|
+| `script` | Script file (in `src/`) that loads the comments. Required — a tag without it is ignored |
+| `input` | Passed to `script` as the first argument |
+| `count` | Number drawn in the bubble (`1.2k` from 1000). Required: missing or `0` means no comments, no bubble |
+
+- A tag between paragraphs belongs to the paragraph above it. One bubble per paragraph.
+- The tag is only read by the reader: TTS, search, word count, export and batch translate
+  see the text without it. Users can hide the bubbles in the reader settings.
+- The chapter is cached with its HTML, so counts are as fresh as the cached chapter.
+
+`script` works like a detail `comments` source: `execute(input, next)` returns a page of
+comments, and a non-empty `data2` is the `next` token of the following page.
+
+```js
+function execute(input, next) {
+    let json = fetch("https://site/comments?" + input + "&page=" + (next || 1)).json();
+    let comments = json.items.map(function(c) {
+        return {
+            name: c.user,
+            avatar: c.avatar,
+            content: c.text,                      // HTML is flattened to plain text
+            description: c.time,                  // small line under the comment
+            replies: [],                          // replies given in full (or a preview)
+            reply: { input: c.id, script: "para_reply.js" }, // optional: replies page by page
+            reply_count: c.replyCount,            // optional: shown before they are loaded
+        };
+    });
+    return Response.success(comments, json.hasNext ? String((next || 1) + 1) : "");
+}
+```
+
+`reply` loads a comment's replies with the same format and paging, from the first page;
+once loaded they take the place of `replies`.
 
 ```js
 // Comic (return array of image URLs)
@@ -1081,6 +1234,11 @@ fails it embeds the page — the absolute iframe `src` when there is one, else t
 HTML. The JSON `host` is only the base URL for HTML without an absolute iframe; the
 embedded page uses the top-level `host` as its base.
 
+Give the JSON an `embed` page URL when the page only plays inside its own player, for
+example when the media URLs carry session tokens. The app then embeds that page at once
+with the episode URL as `Referer`, skipping the headless attempt. Apps before this ignore
+`embed` and use `data`, so keep `data` playable there.
+
 ```js
 function execute(data) {
     let payload = JSON.parse(data);   // encoded by chap.js
@@ -1252,8 +1410,8 @@ let cached = cacheStorage.getItem("key");
 cacheStorage.removeItem("key");
 cacheStorage.clear();
 
-// Dynamic (config.js) setting values; null when unset. Static values are constants.
-let setting = localConfig.getItem("settingKey");
+// Dynamic (config.js) setting values; defaultValue (or null) when unset. Static values are constants.
+let setting = localConfig.getItem("settingKey", "fallback");
 
 // Cookies for the extension's source domain
 localCookie.setCookie("name=value; path=/");
@@ -1648,7 +1806,7 @@ function execute(url) {
         type: "novel",
         format: "novel",
         ongoing: doc.select(".info").text().indexOf("Ongoing") !== -1,
-        tags: doc.select(".genre a").map(function(el) {
+        genres: doc.select(".genre a").map(function(el) {
             return {
                 title: el.text(),
                 input: el.attr("href"),
@@ -2142,10 +2300,31 @@ The tool loop runs entirely inside the extension — the app does not orchestrat
 
 ## Developer Server
 
-The app's developer server (started from the app; it shows its `http://<ip>:<port>`
-address) lets tools test, package and install an extension without building a ZIP by
+The app's developer server (started from the app or a [terminal](#starting-it-from-a-terminal-desktop);
+it shows its `http://<ip>:<port>` address) lets tools test, package and install an extension without building a ZIP by
 hand. Every routed request answers HTTP 200 with a JSON body; the real result is the
 body's `code` (`200` = ok, `403` = failure). Unknown routes answer HTTP 404.
+
+### Starting it from a terminal (desktop)
+
+An AI agent or script can start the server itself instead of asking for the switch in
+the app. Call the app's executable: `/Applications/vBook.app/Contents/MacOS/vBook` on
+macOS, `vBook.exe` in the install folder on Windows.
+
+```bash
+vBook dev start [--port 8080]   # prints http://<ip>:<port>, exit code 0
+vBook dev status                # prints the address, exit code 1 when off or app closed
+vBook dev stop
+```
+
+- `start` opens the app with its window if it isn't running (up to a minute), turns
+  developer mode on, and does nothing if the server already runs on that port. Without
+  `--port` it uses the saved port; a port that worked is saved.
+- Use the printed address as the base URL. It fails with exit code 1 and a message on
+  stderr when the port is taken.
+- On Windows `vBook.exe` is a GUI program: run it through `start /wait` so the terminal
+  waits for it.
+- The server has no token and listens on the whole local network: `stop` it when done.
 
 ### Payload
 
